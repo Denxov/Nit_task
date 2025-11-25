@@ -6,8 +6,8 @@ import os
 
 def start_manager():
     try:
-        if os.path.exists('_old.py'):
-            subprocess.Popen([sys.executable, '_old.py'])
+        if os.path.exists('manager_gui.py'):
+            subprocess.Popen([sys.executable, 'manager_gui.py'])
             messagebox.showinfo("Успех", "Менеджер запущен")
         else:
             messagebox.showerror("Ошибка", "_old.py не найден")

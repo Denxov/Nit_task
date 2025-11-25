@@ -13,7 +13,7 @@ class LoginWindow:
         """Окно авторизации для менеджера"""
         self.login_window = tk.Toplevel(self.root)
         self.login_window.title("Авторизация менеджера")
-        self.login_window.geometry("350x250")
+        self.login_window.geometry("350x280")
         self.login_window.resizable(False, False)
         self.login_window.transient(self.root)
         self.login_window.grab_set()

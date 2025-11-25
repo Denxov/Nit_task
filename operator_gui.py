@@ -15,6 +15,7 @@ class OperatorClient:
         self.connected = False
         self.receive_thread = None
         self.lock = threading.Lock()
+        self.current_tasks = [[], []]  # Задачи для двух конвейеров
 
     def connect(self):
         try:
@@ -46,47 +47,128 @@ class OperatorClient:
             'password': password
         }
 
-        return self.send_and_receive(message)
+        result = self.send_and_receive(message)
+        if result.get('status') == 'success':
+            self.username = username
+            # После успешного входа запрашиваем текущие задачи
+            self.request_tasks()
+        return result
+
+    def request_tasks(self):
+        """Запрос текущих задач с сервера"""
+        try:
+            if not self.connected or not self.username:
+                print("Нет подключения или пользователь не авторизован")
+                return
+
+            message = {
+                'type': 'get_operator_tasks',
+                'operator': self.username
+            }
+
+            result = self.send_and_receive(message)
+            if result.get('status') == 'success' and result.get('type') == 'operator_tasks_response':
+                tasks = result.get('tasks', [[], []])
+                self.current_tasks = tasks
+                print(
+                    f"Получены задачи с сервера: конвейер 1 - {len(tasks[0])} задач, конвейер 2 - {len(tasks[1])} задач")
+
+                # Уведомляем GUI о новых задачах
+                if hasattr(self, 'on_tasks_updated'):
+                    self.on_tasks_updated()
+            else:
+                print(f"Ошибка получения задач: {result.get('message', 'Unknown error')}")
+
+        except Exception as e:
+            print(f"Ошибка запроса задач: {e}")
 
     def send_and_receive(self, message):
         try:
             with self.lock:
+                if not self.connected or not self.socket:
+                    return {'status': 'error', 'message': 'Нет подключения к серверу'}
+
                 # Отправляем сообщение
                 message_str = json.dumps(message) + '\n'
                 self.socket.send(message_str.encode('utf-8'))
                 print(f"Отправлено: {message['type']}")
 
-                # Ждем ответ
-                response = self.socket.recv(1024).decode('utf-8').strip()
-                if response:
-                    return json.loads(response)
-                else:
-                    return {'status': 'error', 'message': 'Пустой ответ от сервера'}
+                # Получаем ответ
+                response_data = b""
+                start_time = time.time()
 
-        except socket.timeout:
-            return {'status': 'error', 'message': 'Таймаут ожидания ответа'}
-        except json.JSONDecodeError:
-            return {'status': 'error', 'message': 'Неверный формат ответа'}
+                while time.time() - start_time < 10:  # Таймаут 10 секунд
+                    try:
+                        # Устанавливаем короткий таймаут для recv
+                        self.socket.settimeout(0.1)
+                        chunk = self.socket.recv(1024)
+                        if chunk:
+                            response_data += chunk
+
+                            # Пробуем декодить JSON
+                            try:
+                                response_str = response_data.decode('utf-8').strip()
+                                if response_str:
+                                    # Ищем полный JSON (до новой строки)
+                                    if '\n' in response_str:
+                                        response_str = response_str.split('\n')[0]
+                                    response = json.loads(response_str)
+                                    self.socket.settimeout(0.5)  # Возвращаем обычный таймаут
+                                    return response
+                            except json.JSONDecodeError:
+                                # Неполный JSON, продолжаем читать
+                                continue
+                        else:
+                            # Сервер закрыл соединение
+                            break
+
+                    except socket.timeout:
+                        # Таймаут recv - продолжаем цикл
+                        continue
+                    except BlockingIOError:
+                        # Нет данных - продолжаем цикл
+                        continue
+
+                # Таймаут основного цикла
+                self.socket.settimeout(0.5)
+                if response_data:
+                    try:
+                        response_str = response_data.decode('utf-8').strip()
+                        if response_str:
+                            if '\n' in response_str:
+                                response_str = response_str.split('\n')[0]
+                            response = json.loads(response_str)
+                            return response
+                    except:
+                        pass
+
+                return {'status': 'error', 'message': 'Таймаут ожидания ответа'}
+
         except Exception as e:
+            if hasattr(self, 'socket') and self.socket:
+                self.socket.settimeout(0.5)
             print(f"Ошибка обмена данными: {e}")
-            return {'status': 'error', 'message': str(e)}
+            return {'status': 'error', 'message': f'Ошибка связи: {str(e)}'}
 
     def receive_messages(self):
+        buffer = ""
         while self.connected:
             try:
                 data = self.socket.recv(1024).decode('utf-8')
                 if not data:
                     break
 
-                # Обрабатываем входящие сообщения (уведомления)
-                messages = data.strip().split('\n')
-                for msg in messages:
-                    if msg:
+                buffer += data
+
+                # Обрабатываем полные сообщения
+                while '\n' in buffer:
+                    line, buffer = buffer.split('\n', 1)
+                    if line.strip():
                         try:
-                            message = json.loads(msg)
-                            self.handle_notification(message)
+                            message = json.loads(line)
+                            self.handle_server_message(message)
                         except json.JSONDecodeError:
-                            print(f"Неверный JSON: {msg}")
+                            print(f"Неверный JSON: {line}")
 
             except socket.timeout:
                 continue
@@ -98,17 +180,71 @@ class OperatorClient:
         self.connected = False
         print("Поток приема завершен")
 
-    def handle_notification(self, message):
+    def handle_server_message(self, message):
         msg_type = message.get('type')
-        print(f"Уведомление: {msg_type}")
+        print(f"Уведомление от сервера: {msg_type}")
 
         if msg_type == 'new_task':
-            print(f"Новая задача: {message}")
-            if hasattr(self, 'on_new_task'):
-                self.on_new_task(message)
+            task = message.get('task', {})
+            conveyor = message.get('conveyor', 0)
+            print(f"Получена новая задача для конвейера {conveyor}: {task}")
+
+            # Добавляем задачу в соответствующий конвейер
+            if 0 <= conveyor < 2:
+                # Проверяем, нет ли уже такой задачи (по ID)
+                task_exists = any(t.get('id') == task.get('id') for t in self.current_tasks[conveyor])
+                if not task_exists:
+                    self.current_tasks[conveyor].append(task)
+                    print(f"Задача добавлена в конвейер {conveyor}. Всего задач: {len(self.current_tasks[conveyor])}")
+
+                # Уведомляем GUI
+                if hasattr(self, 'on_new_task'):
+                    self.on_new_task(message)
+
+        elif msg_type == 'operator_tasks_response':
+            # Ответ на запрос задач (может прийти асинхронно)
+            tasks = message.get('tasks', [[], []])
+            self.current_tasks = tasks
+            print(f"Асинхронно получены задачи: конвейер 1 - {len(tasks[0])} задач, конвейер 2 - {len(tasks[1])} задач")
+
+            if hasattr(self, 'on_tasks_updated'):
+                self.on_tasks_updated()
+
+    def get_tasks(self):
+        """Возвращает текущие задачи"""
+        return self.current_tasks
+
+    def update_task_status(self, task_id, conveyor, status='completed'):
+        """Обновление статуса задачи"""
+        try:
+            # Ищем задачу и обновляем статус
+            for i, task in enumerate(self.current_tasks[conveyor]):
+                if task.get('id') == task_id:
+                    self.current_tasks[conveyor][i]['status'] = status
+                    self.current_tasks[conveyor][i]['completed'] = time.strftime("%Y-%m-%d %H:%M:%S")
+                    print(f"Статус задачи {task_id} обновлен на {status}")
+
+                    # Отправляем обновление на сервер
+                    update_message = {
+                        'type': 'update_task_status',
+                        'operator': self.username,
+                        'conveyor': conveyor,
+                        'task_id': task_id,
+                        'status': status
+                    }
+                    self.send_and_receive(update_message)
+
+                    return True
+            return False
+        except Exception as e:
+            print(f"Ошибка обновления задачи: {e}")
+            return False
 
     def set_new_task_callback(self, callback):
         self.on_new_task = callback
+
+    def set_tasks_updated_callback(self, callback):
+        self.on_tasks_updated = callback
 
     def disconnect(self):
         self.connected = False
@@ -132,6 +268,7 @@ class OperatorGUI:
 
         self.client = OperatorClient()
         self.client.set_new_task_callback(self.handle_new_task)
+        self.client.set_tasks_updated_callback(self.handle_tasks_updated)
 
         self.show_login_screen()
 
@@ -145,12 +282,18 @@ class OperatorGUI:
                 "Новая задача",
                 f"Получена новая задача на конвейере {conveyor}:\n"
                 f"Сырье: {task.get('material', 'N/A')}\n"
-                f"Цвет: {task.get('color', 'N/A')}"
+                f"Цвет: {task.get('color', 'N/A')}\n"
+                f"Скорость: {task.get('speed', 'N/A')}\n"
+                f"Температура: {task.get('temperature', 'N/A')}"
             )
             self.refresh_tasks()
 
         # Вызываем в основном потоке
         self.root.after(0, show_notification)
+
+    def handle_tasks_updated(self):
+        """Обработка обновления списка задач"""
+        self.root.after(0, self.refresh_tasks)
 
     def clear_screen(self):
         """Очистка экрана - безопасный метод"""
@@ -207,7 +350,7 @@ class OperatorGUI:
         # Тестовые данные
         test_label = ttk.Label(
             login_frame,
-            text="Тест: operator1/pass1",
+            text="Тест: operator1/pass1, operator2/pass2, operator3/pass3",
             font=('Arial', 9),
             foreground="gray"
         )
@@ -268,11 +411,20 @@ class OperatorGUI:
         )
         user_label.pack(side=tk.LEFT)
 
+        # Статус подключения
+        conn_status = "Подключен" if self.client.connected else "Не подключен"
+        status_label = ttk.Label(
+            header_frame,
+            text=f"Статус: {conn_status}",
+            foreground="green" if self.client.connected else "red"
+        )
+        status_label.pack(side=tk.LEFT, padx=20)
+
         # Кнопки управления
         btn_frame = ttk.Frame(header_frame)
         btn_frame.pack(side=tk.RIGHT)
 
-        refresh_btn = ttk.Button(btn_frame, text="Обновить", command=self.refresh_tasks)
+        refresh_btn = ttk.Button(btn_frame, text="Обновить задачи", command=self.manual_refresh_tasks)
         refresh_btn.pack(side=tk.LEFT, padx=5)
 
         logout_btn = ttk.Button(btn_frame, text="Выйти", command=self.logout)
@@ -283,6 +435,9 @@ class OperatorGUI:
 
         # Загружаем задачи
         self.refresh_tasks()
+
+        # Запускаем периодическое обновление
+        self.start_periodic_updates()
 
     def setup_conveyors(self):
         """Настройка отображения конвейеров"""
@@ -326,6 +481,24 @@ class OperatorGUI:
         self.conv2_inner.bind("<Configure>",
                               lambda e: configure_scrollregion(e, self.conv2_canvas))
 
+    def start_periodic_updates(self):
+        """Периодическое обновление статуса"""
+
+        def update():
+            if hasattr(self, 'conv1_inner') and self.client.connected:
+                # Автоматически запрашиваем обновление задач каждые 30 секунд
+                self.client.request_tasks()
+            self.root.after(30000, update)  # Обновление каждые 30 секунд
+
+        self.root.after(30000, update)
+
+    def manual_refresh_tasks(self):
+        """Ручное обновление задач"""
+        if self.client.connected:
+            self.client.request_tasks()
+        else:
+            messagebox.showwarning("Ошибка", "Нет подключения к серверу")
+
     def refresh_tasks(self):
         """Обновление отображения задач"""
         self.clear_tasks()
@@ -334,7 +507,9 @@ class OperatorGUI:
             self.show_no_connection()
             return
 
-        self.show_demo_tasks()
+        # Получаем реальные задачи от клиента
+        tasks = self.client.get_tasks()
+        self.show_real_tasks(tasks)
 
     def clear_tasks(self):
         """Очистка отображения задач"""
@@ -360,30 +535,36 @@ class OperatorGUI:
         )
         label.pack(pady=50)
 
-    def show_demo_tasks(self):
-        """Показ демонстрационных задач"""
-        tasks = [
-            {
-                'material': 'Пластик ABS',
-                'color': 'Красный',
-                'speed': '100 мм/с',
-                'temperature': '220°C',
-                'status': 'active',
-                'id': '1'
-            },
-            {
-                'material': 'Поликарбонат',
-                'color': 'Прозрачный',
-                'speed': '80 мм/с',
-                'temperature': '280°C',
-                'status': 'completed',
-                'id': '2'
-            }
-        ]
+    def show_real_tasks(self, tasks):
+        """Показ реальных задач с сервера"""
+        # Конвейер 1
+        if tasks[0]:
+            for task in tasks[0]:
+                self.create_task_widget(task, 0)
+        else:
+            self.show_no_tasks_message(0)
 
-        for i, task in enumerate(tasks):
-            conveyor = 0 if i % 2 == 0 else 1
-            self.create_task_widget(task, conveyor)
+        # Конвейер 2
+        if tasks[1]:
+            for task in tasks[1]:
+                self.create_task_widget(task, 1)
+        else:
+            self.show_no_tasks_message(1)
+
+    def show_no_tasks_message(self, conveyor):
+        """Сообщение об отсутствии задач"""
+        if conveyor == 0:
+            parent = self.conv1_inner
+        else:
+            parent = self.conv2_inner
+
+        label = ttk.Label(
+            parent,
+            text="Нет задач",
+            font=('Arial', 11),
+            foreground="gray"
+        )
+        label.pack(pady=20)
 
     def create_task_widget(self, task, conveyor):
         """Создание виджета задачи"""
@@ -406,11 +587,17 @@ class OperatorGUI:
 
         # Текст задачи
         task_text = (
-            f"Сырье: {task['material']}\n"
-            f"Цвет: {task['color']}\n"
-            f"Скорость: {task['speed']}\n"
-            f"Температура: {task['temperature']}"
+            f"Сырье: {task.get('material', 'N/A')}\n"
+            f"Цвет: {task.get('color', 'N/A')}\n"
+            f"Скорость: {task.get('speed', 'N/A')}\n"
+            f"Температура: {task.get('temperature', 'N/A')}"
         )
+
+        # Добавляем информацию о времени создания если есть
+        if task.get('created'):
+            task_text += f"\nСоздано: {task.get('created')}"
+        if task.get('completed'):
+            task_text += f"\nВыполнено: {task.get('completed')}"
 
         task_label = tk.Label(
             task_frame,
@@ -426,25 +613,36 @@ class OperatorGUI:
             complete_btn = ttk.Button(
                 task_frame,
                 text="Выполнено",
-                command=lambda t=task: self.complete_task(t)
+                command=lambda t=task, c=conveyor: self.complete_task(t, c)
             )
             complete_btn.pack(side=tk.RIGHT, padx=5, pady=5)
 
-    def complete_task(self, task):
+    def complete_task(self, task, conveyor):
         """Отметка задачи как выполненной"""
+        if not self.client.connected:
+            messagebox.showwarning("Нет подключения", "Нет подключения к серверу")
+            return
+
         result = messagebox.askyesno(
             "Подтверждение",
-            f"Задача выполнена?\n{task['material']} - {task['color']}"
+            f"Отметить задачу как выполненную?\n"
+            f"Сырье: {task.get('material', 'N/A')}\n"
+            f"Цвет: {task.get('color', 'N/A')}"
         )
 
         if result:
-            messagebox.showinfo("Успех", "Задача отмечена как выполненная")
-            self.refresh_tasks()
+            task_id = task.get('id')
+            if task_id and self.client.update_task_status(task_id, conveyor, 'completed'):
+                messagebox.showinfo("Успех", "Задача отмечена как выполненная")
+                self.refresh_tasks()
+            else:
+                messagebox.showerror("Ошибка", "Не удалось обновить статус задачи")
 
     def logout(self):
         """Выход из системы"""
-        self.client.disconnect()
-        self.show_login_screen()
+        if messagebox.askyesno("Выход", "Выйти из системы?"):
+            self.client.disconnect()
+            self.show_login_screen()
 
 
 def main():
@@ -454,8 +652,9 @@ def main():
         app = OperatorGUI(root)
 
         def on_closing():
-            app.client.disconnect()
-            root.destroy()
+            if messagebox.askokcancel("Выход", "Закрыть приложение?"):
+                app.client.disconnect()
+                root.destroy()
 
         root.protocol("WM_DELETE_WINDOW", on_closing)
         root.mainloop()
