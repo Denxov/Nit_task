@@ -3,7 +3,7 @@ import threading
 import json
 import time
 from datetime import datetime
-
+from config import host_addr,host_port
 
 class ServerManager:
     def __init__(self):
@@ -16,7 +16,7 @@ class ServerManager:
         self.server_socket = None
         self.running = False
 
-    def start_server(self, host='localhost', port=12345):
+    def start_server(self, host=host_addr, port=host_port):
         try:
             self.server_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
             self.server_socket.bind((host, port))

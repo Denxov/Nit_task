@@ -1,13 +1,14 @@
 import tkinter as tk
+from os.path import exists
 from tkinter import ttk, messagebox
 import socket
 import json
 import threading
 import time
-
+from config import host_addr,host_port
 
 class OperatorClient:
-    def __init__(self, host='localhost', port=12345):
+    def __init__(self, host=host_addr, port=host_port):
         self.host = host
         self.port = port
         self.socket = None
@@ -22,12 +23,12 @@ class OperatorClient:
             self.socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
             self.socket.settimeout(5)
             self.socket.connect((self.host, self.port))
-            self.socket.settimeout(0.5)
+            self.socket.settimeout(1.5)
             self.connected = True
 
             self.receive_thread = threading.Thread(target=self.receive_messages)
             self.receive_thread.daemon = True
-            self.receive_thread.start()
+            #self.receive_thread.start()
 
             print("Успешное подключение к серверу")
             return True
@@ -100,7 +101,7 @@ class OperatorClient:
                 while time.time() - start_time < 10:  # Таймаут 10 секунд
                     try:
                         # Устанавливаем короткий таймаут для recv
-                        self.socket.settimeout(0.1)
+                        self.socket.settimeout(0.3)
                         chunk = self.socket.recv(1024)
                         if chunk:
                             response_data += chunk
@@ -488,9 +489,9 @@ class OperatorGUI:
             if hasattr(self, 'conv1_inner') and self.client.connected:
                 # Автоматически запрашиваем обновление задач каждые 30 секунд
                 self.client.request_tasks()
-            self.root.after(30000, update)  # Обновление каждые 30 секунд
+            self.root.after(10000, update)  # Обновление каждые 30 секунд
 
-        self.root.after(30000, update)
+        self.root.after(10000, update)
 
     def manual_refresh_tasks(self):
         """Ручное обновление задач"""
@@ -513,6 +514,7 @@ class OperatorGUI:
 
     def clear_tasks(self):
         """Очистка отображения задач"""
+        if not hasattr(self,"conv1_inner"): return
         for widget in self.conv1_inner.winfo_children():
             try:
                 widget.destroy()
@@ -553,6 +555,7 @@ class OperatorGUI:
 
     def show_no_tasks_message(self, conveyor):
         """Сообщение об отсутствии задач"""
+        #if not hasattr(self,"conv1.inner"):self.setup_conveyors()
         if conveyor == 0:
             parent = self.conv1_inner
         else:
@@ -568,6 +571,7 @@ class OperatorGUI:
 
     def create_task_widget(self, task, conveyor):
         """Создание виджета задачи"""
+        if not hasattr(self, 'conv1_inner'):self.setup_conveyors()
         if conveyor == 0:
             parent = self.conv1_inner
         else:

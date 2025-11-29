@@ -21,8 +21,8 @@ class LoginWindow:
         # Центрируем окно
         self.login_window.update_idletasks()
         x = (self.login_window.winfo_screenwidth() // 2) - (350 // 2)
-        y = (self.login_window.winfo_screenheight() // 2) - (250 // 2)
-        self.login_window.geometry(f"350x250+{x}+{y}")
+        y = (self.login_window.winfo_screenheight() // 2) - (280 // 2)
+        self.login_window.geometry(f"350x280+{x}+{y}")
 
         # Основной фрейм
         main_frame = ttk.Frame(self.login_window, padding=20)
