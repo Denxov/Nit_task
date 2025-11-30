@@ -1,6 +1,9 @@
+
 import tkinter as tk
 from tkinter import ttk, messagebox
 from server_manager import ServerManager
+from data_manager import data_manager
+from dictionary_manager import DictionaryManager
 
 
 class LoginWindow:
@@ -132,6 +135,9 @@ class ManagerGUI:
         self.root.title("Manager Panel - Production Control System")
         self.root.geometry("1200x700")
 
+        # Инициализируем менеджер справочников
+        self.dict_manager = DictionaryManager(root)
+
         # Сначала показываем окно авторизации
         self.show_authorization()
 
@@ -156,7 +162,7 @@ class ManagerGUI:
         self.start_periodic_updates()
 
     def setup_gui(self):
-        """Настройка основного GUI"""
+        """Настройка основного GUI с добавлением кнопки справочников"""
         # Верхняя панель с операторами
         operator_frame = ttk.Frame(self.root)
         operator_frame.pack(fill=tk.X, padx=10, pady=5)
@@ -216,17 +222,16 @@ class ManagerGUI:
 
         self.conveyor2_canvas.create_window((0, 0), window=self.conveyor2_inner_frame, anchor="nw")
 
-        # Привязка событий прокрутки
-        self.conveyor1_inner_frame.bind("<Configure>", lambda e: self.conveyor1_canvas.configure(
-            scrollregion=self.conveyor1_canvas.bbox("all")))
-        self.conveyor2_inner_frame.bind("<Configure>", lambda e: self.conveyor2_canvas.configure(
-            scrollregion=self.conveyor2_canvas.bbox("all")))
-
         # Панель управления
         control_frame = ttk.Frame(self.root)
         control_frame.pack(fill=tk.X, padx=10, pady=5)
 
         ttk.Button(control_frame, text="Обновить", command=self.refresh_all).pack(side=tk.LEFT, padx=5)
+
+        # Кнопка управления справочниками
+        ttk.Button(control_frame, text="Управление справочниками",
+                   command=self.dict_manager.show_dictionary_editor).pack(side=tk.LEFT, padx=5)
+
         ttk.Button(control_frame, text="Выйти", command=self.logout).pack(side=tk.RIGHT, padx=5)
 
         # Статус сервера
@@ -323,38 +328,6 @@ class ManagerGUI:
         # Отображение задач для конвейера 2
         self.display_tasks_for_conveyor(tasks[1], self.conveyor2_inner_frame, 1)
 
-    def display_tasks_for_conveyor(self, tasks, frame, conveyor):
-        """Отображение задач для конкретного конвейера"""
-        # Кнопка добавления задачи
-        add_task_btn = tk.Button(
-            frame,
-            text="+",
-            height=3,
-            bg='lightgreen',
-            font=('Arial', 20, 'bold'),
-            command=lambda: self.add_task(conveyor)
-        )
-        add_task_btn.pack(fill=tk.X, padx=5, pady=2)
-
-        # Существующие задачи
-        for task in tasks:
-            color = 'lightyellow' if task.get('status') == 'completed' else 'white'
-            task_frame = tk.Frame(frame, bg=color, relief=tk.RAISED, bd=1)
-            task_frame.pack(fill=tk.X, padx=5, pady=2)
-
-            info_text = f"Сырье: {task['material']}\nЦвет: {task['color']}\nСкорость: {task['speed']}\nТемпература: {task['temperature']}"
-            if task.get('status') == 'completed':
-                info_text += f"\nВыполнено: {task.get('completed', '')}"
-            else:
-                info_text += f"\nСоздано: {task.get('created', '')}"
-
-            tk.Label(
-                task_frame,
-                text=info_text,
-                bg=color,
-                font=('Arial', 9),
-                justify=tk.LEFT
-            ).pack(padx=5, pady=5)
 
     def add_task(self, conveyor):
         """Добавление новой задачи"""
@@ -364,45 +337,69 @@ class ManagerGUI:
 
         self.show_task_dialog(conveyor)
 
+    # В методе show_task_dialog класса ManagerGUI
     def show_task_dialog(self, conveyor):
-        """Диалоговое окно для создания новой задачи"""
+        """Обновленный диалог создания задачи с приоритетом"""
         dialog = tk.Toplevel(self.root)
         dialog.title("Новая задача")
-        dialog.geometry("300x300")
+        dialog.geometry("350x400")  # Увеличили высоту для приоритета
         dialog.transient(self.root)
         dialog.grab_set()
 
-        # Центрирование диалога
+        # Центрирование
         dialog.geometry("+%d+%d" % (self.root.winfo_rootx() + 50, self.root.winfo_rooty() + 50))
 
+        # Получаем значения из справочников
+        materials = self.dict_manager.get_combobox_values("materials")
+        colors = self.dict_manager.get_combobox_values("colors")
+        speeds = self.dict_manager.get_combobox_values("speeds")
+        temperatures = self.dict_manager.get_combobox_values("temperatures")
+        priorities = self.dict_manager.get_combobox_values("priorities")
+
         ttk.Label(dialog, text="Сырье:").pack(pady=5)
-        material_entry = ttk.Entry(dialog, width=30)
-        material_entry.pack(pady=5)
-        material_entry.focus()
+        material_combo = ttk.Combobox(dialog, values=materials, width=28)
+        material_combo.pack(pady=5)
+        if materials:
+            material_combo.set(materials[0])
 
         ttk.Label(dialog, text="Цвет:").pack(pady=5)
-        color_entry = ttk.Entry(dialog, width=30)
-        color_entry.pack(pady=5)
+        color_combo = ttk.Combobox(dialog, values=colors, width=28)
+        color_combo.pack(pady=5)
+        if colors:
+            color_combo.set(colors[0])
 
         ttk.Label(dialog, text="Скорость подачи:").pack(pady=5)
-        speed_entry = ttk.Entry(dialog, width=30)
-        speed_entry.pack(pady=5)
+        speed_combo = ttk.Combobox(dialog, values=speeds, width=28)
+        speed_combo.pack(pady=5)
+        if speeds:
+            speed_combo.set(speeds[0])
 
         ttk.Label(dialog, text="Температура:").pack(pady=5)
-        temp_entry = ttk.Entry(dialog, width=30)
-        temp_entry.pack(pady=5)
+        temp_combo = ttk.Combobox(dialog, values=temperatures, width=28)
+        temp_combo.pack(pady=5)
+        if temperatures:
+            temp_combo.set(temperatures[0])
+
+        # Добавляем выбор приоритета
+        ttk.Label(dialog, text="Приоритет:").pack(pady=5)
+        priority_combo = ttk.Combobox(dialog, values=priorities, width=28)
+        priority_combo.pack(pady=5)
+        if priorities:
+            priority_combo.set(priorities[1])  # Средний по умолчанию
 
         def save_task():
             # Проверка заполнения полей
-            if not all([material_entry.get(), color_entry.get(), speed_entry.get(), temp_entry.get()]):
+            if not all([material_combo.get(), color_combo.get(), speed_combo.get(), temp_combo.get(),
+                        priority_combo.get()]):
                 messagebox.showwarning("Предупреждение", "Заполните все поля")
                 return
 
             task_data = {
-                'material': material_entry.get(),
-                'color': color_entry.get(),
-                'speed': speed_entry.get(),
-                'temperature': temp_entry.get()
+                'material': material_combo.get(),
+                'color': color_combo.get(),
+                'speed': speed_combo.get(),
+                'temperature': temp_combo.get(),
+                'priority': priority_combo.get()  # Добавляем приоритет
             }
 
             result = self.server.handle_add_task({
@@ -427,6 +424,58 @@ class ManagerGUI:
 
         # Привязка Enter к сохранению
         dialog.bind('<Return>', lambda e: save_task())
+        material_combo.focus()
+
+    # Также обновим метод display_tasks_for_conveyor для отображения приоритета
+    def display_tasks_for_conveyor(self, tasks, frame, conveyor):
+        """Отображение задач для конкретного конвейера с приоритетами"""
+        # Кнопка добавления задачи
+        add_task_btn = tk.Button(
+            frame,
+            text="+",
+            height=2,
+            bg='lightgreen',
+            font=('Arial', 16, 'bold'),
+            command=lambda: self.add_task(conveyor)
+        )
+        add_task_btn.pack(fill=tk.X, padx=5, pady=2)
+
+        # Существующие задачи
+        for task in tasks:
+            # Цвет фона в зависимости от статуса и приоритета
+            if task.get('status') == 'completed':
+                color = 'lightgray'  # Серый для выполненных
+            else:
+                # Цвет по приоритету для активных задач
+                priority = task.get('priority', 'Средний')
+                if priority == 'Высокий':
+                    color = '#FFCCCC'  # Светло-красный
+                elif priority == 'Средний':
+                    color = '#FFFFCC'  # Светло-желтый
+                else:  # Низкий
+                    color = '#CCFFCC'  # Светло-зеленый
+
+            task_frame = tk.Frame(frame, bg=color, relief=tk.RAISED, bd=1)
+            task_frame.pack(fill=tk.X, padx=5, pady=2)
+
+            info_text = (f"Приоритет: {task.get('priority', 'Средний')}\n"
+                         f"Сырье: {task['material']}\n"
+                         f"Цвет: {task['color']}\n"
+                         f"Скорость: {task['speed']}\n"
+                         f"Температура: {task['temperature']}")
+
+            if task.get('status') == 'completed':
+                info_text += f"\nВыполнено: {task.get('completed', '')}"
+            else:
+                info_text += f"\nСоздано: {task.get('created', '')}"
+
+            tk.Label(
+                task_frame,
+                text=info_text,
+                bg=color,
+                font=('Arial', 9),
+                justify=tk.LEFT
+            ).pack(padx=5, pady=5)
 
     def add_operator(self):
         """Добавление нового оператора"""
