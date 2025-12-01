@@ -44,9 +44,9 @@ class OperatorClient:
             print(f"Подключение к {self.host}:{self.port}...")
 
             self.socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-            self.socket.settimeout(5)
+            self.socket.settimeout(2)
             self.socket.connect((self.host, self.port))
-            self.socket.settimeout(1.5)
+            self.socket.settimeout(0.5)
             self.connected = True
 
             print("✓ Успешное подключение к серверу")
@@ -124,8 +124,8 @@ class OperatorClient:
                 self.socket.send(message_str.encode('utf-8'))
                 print(f"Отправлено: {message['type']}")
 
-                # Ждем ответ с таймаутом
-                self.socket.settimeout(2.0)
+                # Получаем ответ с увеличенным таймаутом
+                self.socket.settimeout(6.0)
                 response_data = self.socket.recv(4096)  # Увеличиваем буфер
                 self.socket.settimeout(0.5)
 
@@ -164,6 +164,7 @@ class OperatorClient:
                 self.socket.settimeout(0.5)
             print(f"Ошибка обмена данными: {e}")
             return {'status': 'error', 'message': str(e)}
+
     def receive_messages(self):
         buffer = ""
         while self.connected:
@@ -236,30 +237,40 @@ class OperatorClient:
         """Возвращает текущие задачи"""
         return self.current_tasks
 
-    def update_task_status(self, task_id, conveyor, status='completed'):
-        """Обновление статуса задачи"""
+    def update_task_quantity(self, task_id, conveyor, completed_quantity):
+        """Обновление выполненного количества задачи"""
         try:
-            # Ищем задачу и обновляем статус
+            # Сначала обновляем локально
             for i, task in enumerate(self.current_tasks[conveyor]):
                 if task.get('id') == task_id:
-                    self.current_tasks[conveyor][i]['status'] = status
-                    self.current_tasks[conveyor][i]['completed'] = time.strftime("%Y-%m-%d %H:%M:%S")
-                    print(f"Статус задачи {task_id} обновлен на {status}")
+                    self.current_tasks[conveyor][i]['completed_quantity'] = completed_quantity
+
+                    # Проверяем, выполнена ли задача полностью
+                    planned = task.get('planned_quantity', 0)
+                    if planned > 0 and completed_quantity >= planned:
+                        self.current_tasks[conveyor][i]['status'] = 'completed'
+                        self.current_tasks[conveyor][i]['completed'] = time.strftime("%Y-%m-%d %H:%M:%S")
+
+                    print(f"Количество задачи {task_id} обновлено: {completed_quantity}")
 
                     # Отправляем обновление на сервер
                     update_message = {
-                        'type': 'update_task_status',
+                        'type': 'update_task_quantity',
                         'operator': self.username,
                         'conveyor': conveyor,
                         'task_id': task_id,
-                        'status': status
+                        'completed_quantity': completed_quantity
                     }
-                    self.send_and_receive(update_message)
+                    result = self.send_and_receive(update_message)
 
-                    return True
+                    if result.get('status') == 'success':
+                        return True
+                    else:
+                        print(f"Ошибка отправки на сервер: {result.get('message')}")
+                        return False
             return False
         except Exception as e:
-            print(f"Ошибка обновления задачи: {e}")
+            print(f"Ошибка обновления количества: {e}")
             return False
 
     def set_new_task_callback(self, callback):
@@ -282,7 +293,7 @@ class OperatorGUI:
     def __init__(self, root):
         self.root = root
         self.root.title("Operator Panel - Production System")
-        self.root.geometry("800x600")
+        self.root.geometry("900x700")  # Увеличили размер для отображения количества
 
         # Создаем основной фрейм
         self.main_frame = ttk.Frame(root)
@@ -296,14 +307,28 @@ class OperatorGUI:
         self.show_login_screen()
 
     def handle_new_task(self, message):
-        """Обработка новой задачи от сервера"""
+        """Обработка новой задачи от сервера с учетом количества"""
 
         def show_notification():
             task = message.get('task', {})
             conveyor = message.get('conveyor', 0) + 1
+            priority = task.get('priority', 'Средний')
+            planned = task.get('planned_quantity', 0)
+            unit = task.get('unit', 'шт')
+
+            # Цвет заголовка в зависимости от приоритета
+            if priority == 'Высокий':
+                title = "❗ ВЫСОКИЙ ПРИОРИТЕТ - Новая задача"
+            elif priority == 'Средний':
+                title = "⚠️ СРЕДНИЙ ПРИОРИТЕТ - Новая задача"
+            else:
+                title = "✅ НИЗКИЙ ПРИОРИТЕТ - Новая задача"
+
             messagebox.showinfo(
-                "Новая задача",
-                f"Получена новая задача на конвейере {conveyor}:\n"
+                title,
+                f"Конвейер: {conveyor}\n"
+                f"Приоритет: {priority}\n"
+                f"Количество: {planned} {unit}\n"
                 f"Сырье: {task.get('material', 'N/A')}\n"
                 f"Цвет: {task.get('color', 'N/A')}\n"
                 f"Скорость: {task.get('speed', 'N/A')}\n"
@@ -519,7 +544,22 @@ class OperatorGUI:
         tasks = self.client.get_tasks()
         total_tasks = len(tasks[0]) + len(tasks[1])
         active_tasks = sum(1 for task in tasks[0] + tasks[1] if task.get('status') == 'active')
-        return f"Задачи: {active_tasks} активных / {total_tasks} всего"
+
+        # Считаем общий прогресс
+        total_planned = 0
+        total_completed = 0
+        for task in tasks[0] + tasks[1]:
+            if task.get('status') == 'active':
+                total_planned += task.get('planned_quantity', 0)
+                total_completed += task.get('completed_quantity', 0)
+
+        if total_planned > 0:
+            progress_percent = (total_completed / total_planned) * 100
+            progress_text = f" | Прогресс: {progress_percent:.1f}%"
+        else:
+            progress_text = ""
+
+        return f"Задачи: {active_tasks} активных / {total_tasks} всего{progress_text}"
 
     def setup_conveyors(self):
         """Настройка отображения конвейеров"""
@@ -567,14 +607,16 @@ class OperatorGUI:
         """Периодическое обновление статуса"""
 
         def update():
-            if hasattr(self, 'conv1_inner') and self.client.connected:
-                # Автоматически запрашиваем обновление задач каждые 30 секунд
+            if hasattr(self, 'conv1_inner') and self.client.connected :
                 self.client.request_tasks()
                 # Обновляем информацию в заголовке
                 self.update_header_info()
-            self.root.after(5500, update)  # Обновление каждые 30 секунд
+                 # Автоматически запрашиваем обновление задач каждые 30 секунд
 
-        self.root.after(5500, update)
+
+            self.root.after(11000, update)  # Обновление каждые 30 секунд
+
+        self.root.after(11000, update)
 
     def update_header_info(self):
         """Обновление информации в заголовке"""
@@ -610,18 +652,17 @@ class OperatorGUI:
 
     def clear_tasks(self):
         """Очистка отображения задач"""
-        if hasattr(self,"conv1_inner"):
-            for widget in self.conv1_inner.winfo_children():
-                try:
-                    widget.destroy()
-                except:
-                    pass
+        for widget in self.conv1_inner.winfo_children():
+            try:
+                widget.destroy()
+            except:
+                pass
 
-            for widget in self.conv2_inner.winfo_children():
-                try:
-                    widget.destroy()
-                except:
-                    pass
+        for widget in self.conv2_inner.winfo_children():
+            try:
+                widget.destroy()
+            except:
+                pass
 
     def show_no_connection(self):
         """Показ сообщения об отсутствии подключения"""
@@ -664,9 +705,8 @@ class OperatorGUI:
         )
         label.pack(pady=20)
 
-    # В методе create_task_widget класса OperatorGUI
     def create_task_widget(self, task, conveyor):
-        """Создание виджета задачи с цветовым выделением приоритета"""
+        """Создание виджета задачи с управлением количеством"""
         if conveyor == 0:
             parent = self.conv1_inner
         else:
@@ -705,98 +745,115 @@ class OperatorGUI:
         # Приоритет (выделенный цветом)
         priority_label = tk.Label(
             content_frame,
-            text=f"Сырье         Цвет        Подача    Температура",
+            text=" Сырье          Цвет          Подача   t°C       План/Факт %",
             bg=bg_color,
-            font=('Arial', 13, 'bold'),
+            font=('Arial', 10, 'bold'),
             fg="black",#priority_color,
             justify=tk.LEFT
         )
         priority_label.pack(anchor=tk.W)
 
+        # Информация о количестве
+        planned = task.get('planned_quantity', 0)
+        completed = task.get('completed_quantity', 0)
+        unit = task.get('unit', 'шт')
+
+        # Прогресс выполнения
+        if planned > 0:
+            progress_percent = (completed / planned) * 100
+            progress_text = f" ({progress_percent:.1f}%)"
+            # Цвет прогресса
+            if progress_percent >= 100:
+                progress_color = "green"
+            elif progress_percent >= 50:
+                progress_color = "orange"
+            else:
+                progress_color = "red"
+        else:
+            progress_text = ""
+            progress_color = "black"
+
+        quantity_text = f"{completed}/{planned} {unit}{progress_text}"
         # Основная информация о задаче
-        task_text = (f"{task.get('material', 'N/A')} | "
-                     f"{task.get('color', 'N/A'):<10} | "
-                     f"{task.get('speed', 'N/A'):<12}| "
-                     f"{task.get('temperature', 'N/A'):<5} ")
+        task_text = (f"{task.get('material', 'N/A'):<15} "
+                     f"{task.get('color', 'N/A'):<15}"
+                     f"{task.get('speed', 'N/A'):<10}"
+                     f"{task.get('temperature', 'N/A'):<10}"+
+                     quantity_text)
 
         # Добавляем информацию о времени создания если есть
         if task.get('created'):
             task_text += f"\nСоздано: {task.get('created')}"
         if task.get('completed'):
-            task_text += f"\nВыполнено: {task.get('completed')}"
+            task_text += f"\n✅ Выполнено: {task.get('completed')}"
 
         task_label = tk.Label(
             content_frame,
             text=task_text,
             bg=bg_color,
-            font=('Arial', 11),
+            font=('Arial', 9),
             justify=tk.LEFT
         )
         task_label.pack(anchor=tk.W)
-
-        # Кнопка выполнения (только для активных задач)
+        """
+        quantity_text = f"Количество: {completed}/{planned} {unit}{progress_text}"
+        quantity_label = tk.Label(
+            content_frame,
+            text=quantity_text,
+            bg=bg_color,
+            font=('Arial', 9, 'bold'),
+            fg=progress_color,
+            justify=tk.LEFT
+        )
+        
+        quantity_label.pack(anchor=tk.W)
+        """
+        # Кнопки управления (только для активных задач)
         if task.get('status') == 'active':
             button_frame = tk.Frame(content_frame, bg=bg_color)
             button_frame.pack(fill=tk.X, pady=(5, 0))
 
+            # Кнопка добавления выполненного количества
+            tk.Label(button_frame, text="Добавить:", bg=bg_color).pack(side=tk.LEFT)
+
+            quantity_entry = ttk.Entry(button_frame, width=6)
+            quantity_entry.pack(side=tk.LEFT, padx=5)
+            quantity_entry.insert(0, "10")  # Значение по умолчанию
+
+            tk.Label(button_frame, text=unit, bg=bg_color).pack(side=tk.LEFT)
+
+            def add_quantity():
+                try:
+                    add_qty = int(quantity_entry.get())
+                    if add_qty <= 0:
+                        messagebox.showwarning("Ошибка", "Введите положительное число")
+                        return
+
+                    new_completed = completed + add_qty
+
+                    if self.client.update_task_quantity(task.get('id'), conveyor, new_completed):
+                        quantity_entry.delete(0, tk.END)
+                        quantity_entry.insert(0, "10")  # Сбрасываем на значение по умолчанию
+                        self.refresh_tasks()
+                    else:
+                        messagebox.showerror("Ошибка", "Не удалось обновить количество")
+                except ValueError:
+                    messagebox.showwarning("Ошибка", "Введите корректное число")
+
+            add_btn = ttk.Button(
+                button_frame,
+                text="Добавить",
+                command=add_quantity
+            )
+            add_btn.pack(side=tk.LEFT, padx=5)
+
+            # Кнопка полного выполнения
             complete_btn = ttk.Button(
                 button_frame,
-                text="Выполнено",
-                command=lambda t=task, c=conveyor: self.complete_task(t, c)
+                text="Выполнить всё",
+                command=lambda: self.client.update_task_quantity(task.get('id'), conveyor, planned)
             )
-            complete_btn.pack(side=tk.RIGHT)
-
-    # Также обновим метод handle_new_task для отображения приоритета в уведомлении
-    def handle_new_task(self, message):
-        """Обработка новой задачи от сервера с учетом приоритета"""
-
-        def show_notification():
-            task = message.get('task', {})
-            conveyor = message.get('conveyor', 0) + 1
-            priority = task.get('priority', 'Средний')
-
-            # Цвет заголовка в зависимости от приоритета
-            if priority == 'Высокий':
-                title = "❗ ВЫСОКИЙ ПРИОРИТЕТ - Новая задача"
-            elif priority == 'Средний':
-                title = "⚠️ СРЕДНИЙ ПРИОРИТЕТ - Новая задача"
-            else:
-                title = "✅ НИЗКИЙ ПРИОРИТЕТ - Новая задача"
-
-            messagebox.showinfo(
-                title,
-                f"Конвейер: {conveyor}\n"
-                f"Приоритет: {priority}\n"
-                f"Сырье: {task.get('material', 'N/A')}\n"
-                f"Цвет: {task.get('color', 'N/A')}\n"
-                f"Скорость: {task.get('speed', 'N/A')}\n"
-                f"Температура: {task.get('temperature', 'N/A')}"
-            )
-            self.refresh_tasks()
-
-        # Вызываем в основном потоке
-        self.root.after(0, show_notification)
-
-    def complete_task(self, task, conveyor):
-        """Отметка задачи как выполненной"""
-        if not self.client.connected:
-            messagebox.showwarning("Нет подключения", "Нет подключения к серверу")
-            return
-
-        result = messagebox.askyesno(
-            "Подтверждение",
-            f"Отметить задачу как выполненную?\n"
-            f"Сырье: {task.get('material', 'N/A')}\n"
-            f"Цвет: {task.get('color', 'N/A')}"
-        )
-
-        if result:
-            task_id = task.get('id')
-            if task_id and self.client.update_task_status(task_id, conveyor, 'completed'):
-                messagebox.showinfo("Успех", "Задача отмечена как выполненная")
-                self.refresh_tasks()
-            else:
-                messagebox.showerror("Ошибка", "Не удалось обновить статус задачи")
+            complete_btn.pack(side=tk.RIGHT, padx=5)
 
     def logout(self):
         """Выход из системы"""

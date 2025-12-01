@@ -161,8 +161,34 @@ class ManagerGUI:
         self.setup_gui()
         self.start_periodic_updates()
 
+    def setup_conveyor_scroll(self, conveyor_frame, canvas, inner_frame, scrollbar):
+        """Настройка прокрутки для конвейера"""
+
+        def on_mousewheel(event):
+            canvas.yview_scroll(int(-1 * (event.delta / 120)), "units")
+
+        def on_frame_configure(event):
+            canvas.configure(scrollregion=canvas.bbox("all"))
+
+        # Создаем тег для всех элементов в canvas
+        canvas_window = canvas.create_window((0, 0), window=inner_frame, anchor="nw", tags=("scrollable",))
+
+        # Привязываем события к тегу
+        canvas.tag_bind("scrollable", "<MouseWheel>", on_mousewheel)
+        canvas.tag_bind("scrollable", "<Button-4>", on_mousewheel)
+        canvas.tag_bind("scrollable", "<Button-5>", on_mousewheel)
+
+        # Также привязываем к самому canvas
+        canvas.bind("<MouseWheel>", on_mousewheel)
+        canvas.bind("<Button-4>", on_mousewheel)
+        canvas.bind("<Button-5>", on_mousewheel)
+
+        # Привязываем события конфигурации
+        canvas.bind("<Configure>", on_frame_configure)
+        inner_frame.bind("<Configure>", on_frame_configure)
+
     def setup_gui(self):
-        """Настройка основного GUI с добавлением кнопки справочников"""
+        """Настройка основного GUI"""
         # Верхняя панель с операторами
         operator_frame = ttk.Frame(self.root)
         operator_frame.pack(fill=tk.X, padx=10, pady=5)
@@ -180,7 +206,8 @@ class ManagerGUI:
         self.operator_scrollbar.pack(side=tk.BOTTOM, fill=tk.X)
 
         self.operator_canvas.create_window((0, 0), window=self.operator_inner_frame, anchor="nw")
-        self.operator_inner_frame.bind("<Configure>", self.on_operator_frame_configure)
+        self.operator_inner_frame.bind("<Configure>", lambda e: self.operator_canvas.configure(
+            scrollregion=self.operator_canvas.bbox("all")))
 
         # Основная область с задачами
         main_frame = ttk.Frame(self.root)
@@ -198,7 +225,7 @@ class ManagerGUI:
         conveyor1_frame = ttk.LabelFrame(conveyor_frame, text="Конвейер 1", padding=10)
         conveyor1_frame.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=(0, 5))
 
-        self.conveyor1_canvas = tk.Canvas(conveyor1_frame)
+        self.conveyor1_canvas = tk.Canvas(conveyor1_frame, highlightthickness=0)
         conveyor1_scrollbar = ttk.Scrollbar(conveyor1_frame, orient=tk.VERTICAL, command=self.conveyor1_canvas.yview)
         self.conveyor1_inner_frame = ttk.Frame(self.conveyor1_canvas)
 
@@ -206,13 +233,14 @@ class ManagerGUI:
         self.conveyor1_canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
         conveyor1_scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
 
-        self.conveyor1_canvas.create_window((0, 0), window=self.conveyor1_inner_frame, anchor="nw")
+        self.conveyor1_window = self.conveyor1_canvas.create_window((0, 0), window=self.conveyor1_inner_frame,
+                                                                    anchor="nw")
 
         # Конвейер 2
         conveyor2_frame = ttk.LabelFrame(conveyor_frame, text="Конвейер 2", padding=10)
         conveyor2_frame.pack(side=tk.RIGHT, fill=tk.BOTH, expand=True, padx=(5, 0))
 
-        self.conveyor2_canvas = tk.Canvas(conveyor2_frame)
+        self.conveyor2_canvas = tk.Canvas(conveyor2_frame, highlightthickness=0)
         conveyor2_scrollbar = ttk.Scrollbar(conveyor2_frame, orient=tk.VERTICAL, command=self.conveyor2_canvas.yview)
         self.conveyor2_inner_frame = ttk.Frame(self.conveyor2_canvas)
 
@@ -220,7 +248,12 @@ class ManagerGUI:
         self.conveyor2_canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
         conveyor2_scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
 
-        self.conveyor2_canvas.create_window((0, 0), window=self.conveyor2_inner_frame, anchor="nw")
+        self.conveyor2_window = self.conveyor2_canvas.create_window((0, 0), window=self.conveyor2_inner_frame,
+                                                                    anchor="nw")
+
+        # Настраиваем прокрутку для обоих конвейеров
+        self.setup_conveyor_scroll(self.conveyor1_canvas, self.conveyor1_inner_frame, conveyor1_scrollbar, "conv1")
+        self.setup_conveyor_scroll(self.conveyor2_canvas, self.conveyor2_inner_frame, conveyor2_scrollbar, "conv2")
 
         # Панель управления
         control_frame = ttk.Frame(self.root)
@@ -240,8 +273,107 @@ class ManagerGUI:
 
         self.refresh_operators()
 
-    def on_operator_frame_configure(self, event):
-        self.operator_canvas.configure(scrollregion=self.operator_canvas.bbox("all"))
+    def setup_conveyor_scroll(self, canvas, inner_frame, scrollbar, conveyor_name):
+        """Настройка прокрутки для конкретного конвейера"""
+
+        def on_mousewheel(event):
+            # Прокручиваем только активный конвейер
+            canvas.yview_scroll(int(-1 * (event.delta / 120)), "units")
+
+        def on_frame_configure(event):
+            # Обновляем scrollregion при изменении размера внутреннего фрейма
+            canvas.configure(scrollregion=canvas.bbox("all"))
+
+        # Привязываем события прокрутки к canvas и его содержимому
+        canvas.bind("<MouseWheel>", on_mousewheel)
+        canvas.bind("<Button-4>", on_mousewheel)  # Linux scroll up
+        canvas.bind("<Button-5>", on_mousewheel)  # Linux scroll down
+
+        # Также привязываем к внутреннему фрейму и всем его потомкам
+        def bind_children(parent):
+            parent.bind("<MouseWheel>", on_mousewheel)
+            parent.bind("<Button-4>", on_mousewheel)
+            parent.bind("<Button-5>", on_mousewheel)
+            for child in parent.winfo_children():
+                bind_children(child)
+
+        bind_children(inner_frame)
+
+        # Привязываем события конфигурации
+        inner_frame.bind("<Configure>", on_frame_configure)
+
+    def display_tasks_for_conveyor(self, tasks, frame, conveyor):
+        """Отображение задач для конкретного конвейера с кнопкой добавления в конце"""
+        # Сначала отображаем существующие задачи
+        for task in tasks:
+            # Цвет фона в зависимости от статуса и приоритета
+            if task.get('status') == 'completed':
+                color = 'lightgray'  # Серый для выполненных
+            else:
+                # Цвет по приоритету для активных задач
+                priority = task.get('priority', 'Средний')
+                if priority == 'Высокий':
+                    color = '#FFCCCC'  # Светло-красный
+                elif priority == 'Средний':
+                    color = '#FFFFCC'  # Светло-желтый
+                else:  # Низкий
+                    color = '#CCFFCC'  # Светло-зеленый
+
+            task_frame = tk.Frame(frame, bg=color, relief=tk.RAISED, bd=1)
+            task_frame.pack(fill=tk.X, padx=5, pady=2)
+
+            # Информация о количестве
+            planned = task.get('planned_quantity', 0)
+            completed = task.get('completed_quantity', 0)
+            unit = task.get('unit', 'шт')
+            progress = f"{completed}/{planned} {unit}"
+
+            # Прогресс выполнения
+            if planned > 0:
+                progress_percent = (completed / planned) * 100
+                progress_text = f" ({progress_percent:.1f}%)"
+            else:
+                progress_text = ""
+            info_text = (f"{task.get('material', 'N/A'):<15} "
+                         f"{task.get('color', 'N/A'):<15}"
+                         f"{task.get('speed', 'N/A'):<10}"
+                         f"{task.get('temperature', 'N/A'):<10}" +
+                         progress_text)
+            """
+            info_text = (f"Приоритет: {task.get('priority', 'Средний')}\n"
+                         f"Количество: {progress}{progress_text}\n"
+                         f"Сырье: {task['material']}\n"
+                         f"Цвет: {task['color']}\n"
+                         f"Скорость: {task['speed']}\n"
+                         f"Температура: {task['temperature']}")
+            """
+            if task.get('status') == 'completed':
+                info_text += f"\n✅ Выполнено: {task.get('completed', '')}"
+            else:
+                info_text += f"\nСоздано: {task.get('created', '')}"
+
+            tk.Label(
+                task_frame,
+                text=info_text,
+                bg=color,
+                font=('Arial', 9),
+                justify=tk.LEFT
+            ).pack(padx=5, pady=5)
+
+        # Кнопка добавления задачи В КОНЦЕ списка
+        add_task_frame = tk.Frame(frame, bg='lightgreen', relief=tk.RAISED, bd=1)
+        add_task_frame.pack(fill=tk.X, padx=5, pady=2)
+
+        add_task_btn = tk.Button(
+            add_task_frame,
+            text="+",
+            height=3,
+            bg='lightgreen',
+            font=('Arial', 20, 'bold'),
+            command=lambda: self.add_task(conveyor)
+        )
+        add_task_btn.pack(fill=tk.X, padx=5, pady=5)
+
 
     def start_periodic_updates(self):
         """Запуск периодического обновления данных"""
@@ -250,15 +382,17 @@ class ManagerGUI:
             self.refresh_operators()
             if self.current_operator:
                 self.refresh_tasks()
-            self.root.after(5000, update)
+            self.root.after(5100, update)
 
-        self.root.after(5000, update)
+        self.root.after(5100, update)
 
     def refresh_all(self):
         """Обновление всех данных"""
         self.refresh_operators()
         if self.current_operator:
             self.refresh_tasks()
+
+    # В manager_gui.py обновим метод refresh_operators
 
     def refresh_operators(self):
         """Обновление списка операторов"""
@@ -286,17 +420,12 @@ class ManagerGUI:
             if username == self.current_operator:
                 btn.config(bg='lightgreen', relief=tk.SUNKEN)
 
-        # Кнопка добавления оператора
-        add_btn = tk.Button(
-            self.operator_inner_frame,
-            text="+",
-            width=5,
-            height=2,
-            bg='lightgreen',
-            font=('Arial', 14, 'bold'),
-            command=self.add_operator
-        )
-        add_btn.pack(side=tk.LEFT, padx=5, pady=5)
+        # Кнопка добавления оператора теперь в редакторе справочников
+        # Убираем старую кнопку "+" для операторов
+
+        # Обновляем размер области прокрутки
+        self.operator_inner_frame.update_idletasks()
+        self.operator_canvas.configure(scrollregion=self.operator_canvas.bbox("all"))
 
     def select_operator(self, username):
         """Выбор оператора для просмотра задач"""
@@ -339,10 +468,10 @@ class ManagerGUI:
 
     # В методе show_task_dialog класса ManagerGUI
     def show_task_dialog(self, conveyor):
-        """Обновленный диалог создания задачи с приоритетом"""
+        """Обновленный диалог создания задачи с количеством"""
         dialog = tk.Toplevel(self.root)
         dialog.title("Новая задача")
-        dialog.geometry("350x400")  # Увеличили высоту для приоритета
+        dialog.geometry("350x450")  # Увеличили высоту для количества
         dialog.transient(self.root)
         dialog.grab_set()
 
@@ -355,43 +484,68 @@ class ManagerGUI:
         speeds = self.dict_manager.get_combobox_values("speeds")
         temperatures = self.dict_manager.get_combobox_values("temperatures")
         priorities = self.dict_manager.get_combobox_values("priorities")
+        units = self.dict_manager.get_combobox_values("units")
 
-        ttk.Label(dialog, text="Сырье:").pack(pady=5)
+        ttk.Label(dialog, text="Сырье:").pack(pady=3)
         material_combo = ttk.Combobox(dialog, values=materials, width=28)
-        material_combo.pack(pady=5)
+        material_combo.pack(pady=3)
         if materials:
             material_combo.set(materials[0])
 
-        ttk.Label(dialog, text="Цвет:").pack(pady=5)
+        ttk.Label(dialog, text="Цвет:").pack(pady=3)
         color_combo = ttk.Combobox(dialog, values=colors, width=28)
-        color_combo.pack(pady=5)
+        color_combo.pack(pady=3)
         if colors:
             color_combo.set(colors[0])
 
-        ttk.Label(dialog, text="Скорость подачи:").pack(pady=5)
+        ttk.Label(dialog, text="Скорость подачи:").pack(pady=3)
         speed_combo = ttk.Combobox(dialog, values=speeds, width=28)
-        speed_combo.pack(pady=5)
+        speed_combo.pack(pady=3)
         if speeds:
             speed_combo.set(speeds[0])
 
-        ttk.Label(dialog, text="Температура:").pack(pady=5)
+        ttk.Label(dialog, text="Температура:").pack(pady=3)
         temp_combo = ttk.Combobox(dialog, values=temperatures, width=28)
-        temp_combo.pack(pady=5)
+        temp_combo.pack(pady=3)
         if temperatures:
             temp_combo.set(temperatures[0])
 
         # Добавляем выбор приоритета
-        ttk.Label(dialog, text="Приоритет:").pack(pady=5)
+        ttk.Label(dialog, text="Приоритет:").pack(pady=3)
         priority_combo = ttk.Combobox(dialog, values=priorities, width=28)
-        priority_combo.pack(pady=5)
+        priority_combo.pack(pady=3)
         if priorities:
             priority_combo.set(priorities[1])  # Средний по умолчанию
 
+        # Добавляем поля количества
+        quantity_frame = ttk.Frame(dialog)
+        quantity_frame.pack(fill=tk.X, pady=3)
+
+        ttk.Label(quantity_frame, text="Плановое количество:").pack(side=tk.LEFT)
+        quantity_entry = ttk.Entry(quantity_frame, width=8)
+        quantity_entry.pack(side=tk.LEFT, padx=5)
+        quantity_entry.insert(0, "100")  # Значение по умолчанию
+
+        ttk.Label(quantity_frame, text="Ед.изм:").pack(side=tk.LEFT, padx=(10, 0))
+        unit_combo = ttk.Combobox(quantity_frame, values=units, width=5)
+        unit_combo.pack(side=tk.LEFT, padx=5)
+        if units:
+            unit_combo.set(units[0])  # шт по умолчанию
+
         def save_task():
             # Проверка заполнения полей
-            if not all([material_combo.get(), color_combo.get(), speed_combo.get(), temp_combo.get(),
-                        priority_combo.get()]):
+            if not all([material_combo.get(), color_combo.get(), speed_combo.get(),
+                        temp_combo.get(), priority_combo.get(), quantity_entry.get()]):
                 messagebox.showwarning("Предупреждение", "Заполните все поля")
+                return
+
+            # Проверка числового значения количества
+            try:
+                planned_quantity = int(quantity_entry.get())
+                if planned_quantity <= 0:
+                    raise ValueError("Количество должно быть положительным")
+            except ValueError:
+                messagebox.showwarning("Ошибка", "Введите корректное число для количества")
                 return
 
             task_data = {
@@ -399,7 +553,9 @@ class ManagerGUI:
                 'color': color_combo.get(),
                 'speed': speed_combo.get(),
                 'temperature': temp_combo.get(),
-                'priority': priority_combo.get()  # Добавляем приоритет
+                'priority': priority_combo.get(),
+                'planned_quantity': planned_quantity,
+                'unit': unit_combo.get()
             }
 
             result = self.server.handle_add_task({
@@ -426,56 +582,8 @@ class ManagerGUI:
         dialog.bind('<Return>', lambda e: save_task())
         material_combo.focus()
 
-    # Также обновим метод display_tasks_for_conveyor для отображения приоритета
-    def display_tasks_for_conveyor(self, tasks, frame, conveyor):
-        """Отображение задач для конкретного конвейера с приоритетами"""
-        # Кнопка добавления задачи
-        add_task_btn = tk.Button(
-            frame,
-            text="+",
-            height=2,
-            bg='lightgreen',
-            font=('Arial', 16, 'bold'),
-            command=lambda: self.add_task(conveyor)
-        )
-        add_task_btn.pack(fill=tk.X, padx=5, pady=2)
 
-        # Существующие задачи
-        for task in tasks:
-            # Цвет фона в зависимости от статуса и приоритета
-            if task.get('status') == 'completed':
-                color = 'lightgray'  # Серый для выполненных
-            else:
-                # Цвет по приоритету для активных задач
-                priority = task.get('priority', 'Средний')
-                if priority == 'Высокий':
-                    color = '#FFCCCC'  # Светло-красный
-                elif priority == 'Средний':
-                    color = '#FFFFCC'  # Светло-желтый
-                else:  # Низкий
-                    color = '#CCFFCC'  # Светло-зеленый
 
-            task_frame = tk.Frame(frame, bg=color, relief=tk.RAISED, bd=1)
-            task_frame.pack(fill=tk.X, padx=5, pady=2)
-
-            info_text = (f"Приоритет: {task.get('priority', 'Средний')}\n"
-                         f"Сырье: {task['material']}\n"
-                         f"Цвет: {task['color']}\n"
-                         f"Скорость: {task['speed']}\n"
-                         f"Температура: {task['temperature']}")
-
-            if task.get('status') == 'completed':
-                info_text += f"\nВыполнено: {task.get('completed', '')}"
-            else:
-                info_text += f"\nСоздано: {task.get('created', '')}"
-
-            tk.Label(
-                task_frame,
-                text=info_text,
-                bg=color,
-                font=('Arial', 9),
-                justify=tk.LEFT
-            ).pack(padx=5, pady=5)
 
     def add_operator(self):
         """Добавление нового оператора"""

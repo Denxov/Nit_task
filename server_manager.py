@@ -1,28 +1,38 @@
-import tkinter as tk
-from tkinter import ttk, messagebox
 import socket
 import threading
 import json
 import time
 from datetime import datetime
 from server_discovery import ServerDiscovery
+from data_manager import data_manager
 
 
 class ServerManager:
     def __init__(self):
-        self.operators = {
-            'operator1': {'password': 'pass1', 'active': False, 'tasks': [[], []]},
-            'operator2': {'password': 'pass2', 'active': False, 'tasks': [[], []]},
-            'operator3': {'password': 'pass3', 'active': False, 'tasks': [[], []]}
-        }
+        # Загружаем операторов из файла
+        self.operators_list = data_manager.load_operators()
         self.clients = {}
         self.server_socket = None
         self.running = False
-        self.discovery = ServerDiscovery()  # Добавляем discovery
+        self.discovery = ServerDiscovery()
+
+    def get_operators_dict(self):
+        """Конвертирует список операторов в словарь для обратной совместимости"""
+        operators_dict = {}
+        for operator in self.operators_list:
+            operators_dict[operator['username']] = {
+                'password': operator['password'],
+                'active': operator['active'],
+                'tasks': operator['tasks']
+            }
+        return operators_dict
+
+    def save_operators(self):
+        """Сохранение операторов в файл"""
+        data_manager.save_operators(self.operators_list)
 
     def start_server(self, host='0.0.0.0', port=12345):
         try:
-            # Запускаем основной TCP сервер
             self.server_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
             self.server_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
             self.server_socket.bind((host, port))
@@ -32,8 +42,10 @@ class ServerManager:
             # Запускаем UDP discovery
             self.discovery.start_server_discovery()
 
+            # Получаем реальный IP
+            actual_host = host if host != '0.0.0.0' else socket.gethostbyname(socket.gethostname())
             print(f"=== СЕРВЕР ЗАПУЩЕН ===")
-            print(f"TCP: {host}:{port}")
+            print(f"TCP: {actual_host}:{port}")
             print(f"UDP Discovery: порт {self.discovery.discovery_port}")
             print(f"Ожидание подключений...")
 
@@ -43,8 +55,13 @@ class ServerManager:
 
         except Exception as e:
             print(f"ОШИБКА запуска сервера: {e}")
+            print(f"Проверьте:")
+            print(f"1. Firewall разрешает порт {port}")
+            print(f"2. Порт {port} не занят другой программой")
+            print(f"3. IP адрес корректен")
 
     def accept_connections(self):
+        """Принятие входящих подключений"""
         while self.running:
             try:
                 client_socket, address = self.server_socket.accept()
@@ -60,6 +77,7 @@ class ServerManager:
                     print(f"Ошибка принятия подключения: {e}")
 
     def handle_client(self, client_socket):
+        """Обработка клиентского подключения"""
         try:
             while self.running:
                 data = client_socket.recv(1024).decode('utf-8')
@@ -73,16 +91,26 @@ class ServerManager:
         except Exception as e:
             print(f"Ошибка обработки клиента: {e}")
         finally:
+            # Удаляем клиента из активных и обновляем статус
+            for username, sock in list(self.clients.items()):
+                if sock == client_socket:
+                    data_manager.update_operator_status(username, False)
+                    # Обновляем локальный список
+                    self.operators_list = data_manager.load_operators()
+                    del self.clients[username]
+                    print(f"Оператор {username} отключился")
+                    break
             client_socket.close()
 
     def process_message(self, message, client_socket):
+        """Обработка входящих сообщений"""
         msg_type = message.get('type')
 
         if msg_type == 'login':
             return self.handle_login(message, client_socket)
         elif msg_type == 'get_operators':
             return self.handle_get_operators()
-        elif msg_type == 'get_operator_tasks':  # Добавляем новый тип
+        elif msg_type == 'get_operator_tasks':
             return self.handle_get_operator_tasks(message)
         elif msg_type == 'add_task':
             return self.handle_add_task(message)
@@ -90,41 +118,81 @@ class ServerManager:
             return self.handle_add_operator(message)
         elif msg_type == 'update_task_status':
             return self.handle_update_task_status(message)
+        elif msg_type == 'update_task_quantity':
+            return self.handle_update_task_quantity(message)
         elif msg_type == 'heartbeat':
             return {'status': 'alive'}
 
         return {'status': 'error', 'message': 'Неизвестный тип сообщения'}
 
-
     def handle_login(self, message, client_socket):
+        """Обработка входа пользователя"""
         username = message.get('username')
         password = message.get('password')
 
-        if username in self.operators and self.operators[username]['password'] == password:
-            self.operators[username]['active'] = True
+        operator = data_manager.get_operator_by_username(username)
+        if operator and operator['password'] == password:
+            # Обновляем статус активности
+            data_manager.update_operator_status(username, True)
+            # Обновляем локальный список
+            self.operators_list = data_manager.load_operators()
+
             self.clients[username] = client_socket
+            print(f"Оператор {username} успешно авторизовался")
             return {'status': 'success', 'user_type': 'operator'}
         elif username == 'manager' and password == 'manager':
+            print(f"Менеджер успешно авторизовался")
             return {'status': 'success', 'user_type': 'manager'}
         else:
+            print(f"Неудачная попытка входа: {username}")
             return {'status': 'error', 'message': 'Неверные учетные данные'}
 
     def handle_get_operators(self):
+        """Возвращает данные операторов для отображения в GUI"""
         operators_data = {}
-        for username, data in self.operators.items():
-            operators_data[username] = {
-                'active': data['active'],
-                'tasks': data['tasks']
+        for operator in self.operators_list:
+            operators_data[operator['username']] = {
+                'active': operator['active'],
+                'tasks': operator['tasks']
             }
         return {'status': 'success', 'operators': operators_data}
 
-    # В методе handle_add_task класса ServerManager
+    def handle_get_operator_tasks(self, message):
+        """Обработка запроса задач оператора"""
+        operator_name = message.get('operator')
+
+        operator = data_manager.get_operator_by_username(operator_name)
+        if operator:
+            return {
+                'status': 'success',
+                'type': 'operator_tasks_response',
+                'tasks': operator['tasks']
+            }
+        return {'status': 'error', 'message': 'Оператор не найден'}
+
+    def handle_add_operator(self, message):
+        """Добавление нового оператора"""
+        username = message.get('username')
+        password = message.get('password')
+
+        success, message_text = data_manager.add_operator(username, password)
+        if success:
+            # Обновляем локальный список
+            self.operators_list = data_manager.load_operators()
+            print(f"Добавлен новый оператор: {username}")
+        else:
+            print(f"Ошибка добавления оператора {username}: {message_text}")
+
+        return {'status': 'success' if success else 'error', 'message': message_text}
+
     def handle_add_task(self, message):
-        operator = message.get('operator')
+        """Добавление новой задачи"""
+        operator_name = message.get('operator')
         conveyor = message.get('conveyor')
         task_data = message.get('task')
 
-        if operator in self.operators:
+        operator = data_manager.get_operator_by_username(operator_name)
+        if operator:
             task_id = f"task_{int(time.time())}_{conveyor}"
             task = {
                 'id': task_id,
@@ -132,20 +200,25 @@ class ServerManager:
                 'color': task_data['color'],
                 'speed': task_data['speed'],
                 'temperature': task_data['temperature'],
-                'priority': task_data.get('priority', 'Средний'),  # Добавляем приоритет
+                'priority': task_data.get('priority', 'Средний'),
+                'planned_quantity': task_data.get('planned_quantity', 0),
+                'completed_quantity': 0,
+                'unit': task_data.get('unit', 'шт'),
                 'status': 'active',
                 'created': datetime.now().strftime("%Y-%m-%d %H:%M:%S")
             }
 
-            self.operators[operator]['tasks'][conveyor].append(task)
+            # Добавляем задачу оператору
+            operator['tasks'][conveyor].append(task)
+            data_manager.update_operator_tasks(operator_name, operator['tasks'])
 
-            # Сохраняем изменения
-            #self.save_operators()
+            # Обновляем локальный список
+            self.operators_list = data_manager.load_operators()
 
-            print(f"Задача добавлена для {operator}, конвейер {conveyor}: {task}")
+            print(f"Задача добавлена для {operator_name}, конвейер {conveyor}: {task}")
 
             # Уведомление оператора если он онлайн
-            if self.operators[operator]['active'] and operator in self.clients:
+            if operator['active'] and operator_name in self.clients:
                 try:
                     notification = {
                         'type': 'new_task',
@@ -153,349 +226,202 @@ class ServerManager:
                         'conveyor': conveyor
                     }
                     notification_str = json.dumps(notification) + '\n'
-                    self.clients[operator].send(notification_str.encode('utf-8'))
-                    print(f"Уведомление отправлено оператору {operator}")
+                    self.clients[operator_name].send(notification_str.encode('utf-8'))
+                    print(f"Уведомление отправлено оператору {operator_name}")
                 except Exception as e:
                     print(f"Ошибка отправки уведомления: {e}")
 
             return {'status': 'success', 'task_id': task_id}
         return {'status': 'error', 'message': 'Оператор не найден'}
-    def handle_add_operator(self, message):
-        username = message.get('username')
-        password = message.get('password')
-
-        if username in self.operators:
-            return {'status': 'error', 'message': 'Оператор уже существует'}
-
-        self.operators[username] = {
-            'password': password,
-            'active': False,
-            'tasks': [[], []]
-        }
-        return {'status': 'success'}
 
     def handle_update_task_status(self, message):
-        operator = message.get('operator')
+        """Обновление статуса задачи"""
+        operator_name = message.get('operator')
         conveyor = message.get('conveyor')
         task_id = message.get('task_id')
         status = message.get('status')
 
-        if operator in self.operators:
-            for task in self.operators[operator]['tasks'][conveyor]:
+        operator = data_manager.get_operator_by_username(operator_name)
+        if operator:
+            for task in operator['tasks'][conveyor]:
                 if task.get('id') == task_id:
                     task['status'] = status
                     task['completed'] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+                    data_manager.update_operator_tasks(operator_name, operator['tasks'])
+                    # Обновляем локальный список
+                    self.operators_list = data_manager.load_operators()
+
+                    print(f"Статус задачи {task_id} обновлен на {status}")
                     return {'status': 'success'}
 
         return {'status': 'error', 'message': 'Задача не найдена'}
 
-    def handle_get_operator_tasks(self, message):
-        """Обработка запроса задач оператора"""
-        operator = message.get('operator')
+    def handle_update_task_quantity(self, message):
+        """Обновление выполненного количества задачи"""
+        operator_name = message.get('operator')
+        conveyor = message.get('conveyor')
+        task_id = message.get('task_id')
+        completed_quantity = message.get('completed_quantity')
 
-        if operator in self.operators:
-            tasks = self.operators[operator]['tasks']
-            return {
-                'status': 'success',
-                'type': 'operator_tasks_response',
-                'tasks': tasks
-            }
-        return {'status': 'error', 'message': 'Оператор не найден'}
+        operator = data_manager.get_operator_by_username(operator_name)
+        if operator:
+            for task in operator['tasks'][conveyor]:
+                if task.get('id') == task_id:
+                    task['completed_quantity'] = completed_quantity
 
-class ManagerGUI:
-    def __init__(self, root):
-        self.root = root
-        self.root.title("Manager Panel - Production Control System")
-        self.root.geometry("1200x700")
+                    # Проверяем, выполнена ли задача полностью
+                    planned = task.get('planned_quantity', 0)
+                    if planned > 0 and completed_quantity >= planned:
+                        task['status'] = 'completed'
+                        task['completed'] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                        print(f"Задача {task_id} выполнена полностью: {completed_quantity}/{planned}")
 
-        self.server = ServerManager()
-        self.server.start_server()
+                    data_manager.update_operator_tasks(operator_name, operator['tasks'])
+                    # Обновляем локальный список
+                    self.operators_list = data_manager.load_operators()
 
-        self.current_operator = None
-        self.current_conveyor = 0
+                    print(f"Количество задачи {task_id} обновлено: {completed_quantity}")
+                    return {'status': 'success'}
 
-        self.setup_gui()
-        self.refresh_operators()
+        return {'status': 'error', 'message': 'Задача не найдена'}
 
-    def setup_gui(self):
-        # Верхняя панель с операторами
-        operator_frame = ttk.Frame(self.root)
-        operator_frame.pack(fill=tk.X, padx=10, pady=5)
+    def send_notification_to_operator(self, operator_name, notification):
+        """Отправка уведомления оператору"""
+        if operator_name in self.clients and self.operators_dict().get(operator_name, {}).get('active', False):
+            try:
+                notification_str = json.dumps(notification) + '\n'
+                self.clients[operator_name].send(notification_str.encode('utf-8'))
+                print(f"Уведомление отправлено оператору {operator_name}")
+                return True
+            except Exception as e:
+                print(f"Ошибка отправки уведомления оператору {operator_name}: {e}")
+                return False
+        return False
 
-        ttk.Label(operator_frame, text="Операторы:", font=('Arial', 12, 'bold')).pack(side=tk.LEFT)
+    def get_operator_stats(self):
+        """Получение статистики по операторам"""
+        stats = {
+            'total_operators': len(self.operators_list),
+            'online_operators': sum(1 for op in self.operators_list if op['active']),
+            'total_tasks': 0,
+            'active_tasks': 0,
+            'completed_tasks': 0
+        }
 
-        # Фрейм для кнопок операторов с прокруткой
-        self.operator_canvas = tk.Canvas(operator_frame, height=60)
-        self.operator_scrollbar = ttk.Scrollbar(operator_frame, orient=tk.HORIZONTAL,
-                                                command=self.operator_canvas.xview)
-        self.operator_inner_frame = ttk.Frame(self.operator_canvas)
+        for operator in self.operators_list:
+            for conveyor_tasks in operator['tasks']:
+                stats['total_tasks'] += len(conveyor_tasks)
+                stats['active_tasks'] += sum(1 for task in conveyor_tasks if task.get('status') == 'active')
+                stats['completed_tasks'] += sum(1 for task in conveyor_tasks if task.get('status') == 'completed')
 
-        self.operator_canvas.configure(xscrollcommand=self.operator_scrollbar.set)
-        self.operator_canvas.pack(side=tk.TOP, fill=tk.X, expand=True)
-        self.operator_scrollbar.pack(side=tk.BOTTOM, fill=tk.X)
+        return stats
 
-        self.operator_canvas.create_window((0, 0), window=self.operator_inner_frame, anchor="nw")
-        self.operator_inner_frame.bind("<Configure>", self.on_operator_frame_configure)
+    def broadcast_to_all_operators(self, message):
+        """Отправка сообщения всем подключенным операторам"""
+        disconnected_operators = []
 
-        # Основная область с задачами
-        main_frame = ttk.Frame(self.root)
-        main_frame.pack(fill=tk.BOTH, expand=True, padx=10, pady=5)
+        for operator_name, client_socket in self.clients.items():
+            try:
+                message_str = json.dumps(message) + '\n'
+                client_socket.send(message_str.encode('utf-8'))
+            except Exception as e:
+                print(f"Ошибка отправки сообщения оператору {operator_name}: {e}")
+                disconnected_operators.append(operator_name)
 
-        # Заголовок выбранного оператора
-        self.operator_label = ttk.Label(main_frame, text="Выберите оператора", font=('Arial', 14, 'bold'))
-        self.operator_label.pack(pady=10)
+        # Удаляем отключенных операторов
+        for operator_name in disconnected_operators:
+            if operator_name in self.clients:
+                del self.clients[operator_name]
+                data_manager.update_operator_status(operator_name, False)
 
-        # Фрейм для двух конвейеров
-        conveyor_frame = ttk.Frame(main_frame)
-        conveyor_frame.pack(fill=tk.BOTH, expand=True)
+    def stop_server(self):
+        """Остановка сервера"""
+        print("Остановка сервера...")
+        self.running = False
 
-        # Конвейер 1
-        conveyor1_frame = ttk.LabelFrame(conveyor_frame, text="Конвейер 1", padding=10)
-        conveyor1_frame.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=(0, 5))
+        # Обновляем статусы всех операторов на неактивные
+        for operator in self.operators_list:
+            if operator['active']:
+                data_manager.update_operator_status(operator['username'], False)
 
-        self.conveyor1_canvas = tk.Canvas(conveyor1_frame)
-        conveyor1_scrollbar = ttk.Scrollbar(conveyor1_frame, orient=tk.VERTICAL, command=self.conveyor1_canvas.yview)
-        self.conveyor1_inner_frame = ttk.Frame(self.conveyor1_canvas)
+        # Закрываем все клиентские соединения
+        for client_socket in self.clients.values():
+            try:
+                client_socket.close()
+            except:
+                pass
 
-        self.conveyor1_canvas.configure(yscrollcommand=conveyor1_scrollbar.set)
-        self.conveyor1_canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
-        conveyor1_scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+        # Останавливаем discovery сервер
+        self.discovery.stop_discovery()
 
-        self.conveyor1_canvas.create_window((0, 0), window=self.conveyor1_inner_frame, anchor="nw")
+        # Закрываем серверный сокет
+        if self.server_socket:
+            try:
+                self.server_socket.close()
+            except:
+                pass
 
-        # Конвейер 2
-        conveyor2_frame = ttk.LabelFrame(conveyor_frame, text="Конвейер 2", padding=10)
-        conveyor2_frame.pack(side=tk.RIGHT, fill=tk.BOTH, expand=True, padx=(5, 0))
+        print("Сервер остановлен")
 
-        self.conveyor2_canvas = tk.Canvas(conveyor2_frame)
-        conveyor2_scrollbar = ttk.Scrollbar(conveyor2_frame, orient=tk.VERTICAL, command=self.conveyor2_canvas.yview)
-        self.conveyor2_inner_frame = ttk.Frame(self.conveyor2_canvas)
-
-        self.conveyor2_canvas.configure(yscrollcommand=conveyor2_scrollbar.set)
-        self.conveyor2_canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
-        conveyor2_scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
-
-        self.conveyor2_canvas.create_window((0, 0), window=self.conveyor2_inner_frame, anchor="nw")
-
-        # Привязка событий прокрутки
-        self.conveyor1_inner_frame.bind("<Configure>", lambda e: self.conveyor1_canvas.configure(
-            scrollregion=self.conveyor1_canvas.bbox("all")))
-        self.conveyor2_inner_frame.bind("<Configure>", lambda e: self.conveyor2_canvas.configure(
-            scrollregion=self.conveyor2_canvas.bbox("all")))
-
-    def on_operator_frame_configure(self, event):
-        self.operator_canvas.configure(scrollregion=self.operator_canvas.bbox("all"))
-
-    def refresh_operators(self):
-        # Очистка текущих кнопок операторов
-        for widget in self.operator_inner_frame.winfo_children():
-            widget.destroy()
-
-        operators_data = self.server.handle_get_operators()['operators']
-
-        # Кнопки операторов
-        for username, data in operators_data.items():
-            color = 'lightblue' if data['active'] else 'lightgray'
-            btn = tk.Button(
-                self.operator_inner_frame,
-                text=username,
-                width=15,
-                height=2,
-                bg=color,
-                font=('Arial', 10),
-                command=lambda u=username: self.select_operator(u)
-            )
-            btn.pack(side=tk.LEFT, padx=5, pady=5)
-
-        # Кнопка добавления оператора
-        add_btn = tk.Button(
-            self.operator_inner_frame,
-            text="+",
-            width=5,
-            height=2,
-            bg='lightgreen',
-            font=('Arial', 14, 'bold'),
-            command=self.add_operator
-        )
-        add_btn.pack(side=tk.LEFT, padx=5, pady=5)
-
-    def select_operator(self, username):
-        self.current_operator = username
-        self.operator_label.config(text=f"Оператор: {username}")
-        self.refresh_tasks()
-
-    def refresh_tasks(self):
-        if not self.current_operator:
-            return
-
-        # Очистка текущих задач
-        for widget in self.conveyor1_inner_frame.winfo_children():
-            widget.destroy()
-        for widget in self.conveyor2_inner_frame.winfo_children():
-            widget.destroy()
-
-        operators_data = self.server.handle_get_operators()['operators']
-        tasks = operators_data[self.current_operator]['tasks']
-
-        # Отображение задач для конвейера 1
-        self.display_tasks_for_conveyor(tasks[0], self.conveyor1_inner_frame, 0)
-
-        # Отображение задач для конвейера 2
-        self.display_tasks_for_conveyor(tasks[1], self.conveyor2_inner_frame, 1)
-
-    def display_tasks_for_conveyor(self, tasks, frame, conveyor):
-        # Кнопка добавления задачи
-        add_task_btn = tk.Button(
-            frame,
-            text="+",
-            height=3,
-            bg='lightgreen',
-            font=('Arial', 20, 'bold'),
-            command=lambda: self.add_task(conveyor)
-        )
-        add_task_btn.pack(fill=tk.X, padx=5, pady=2)
-
-        # Существующие задачи
-        for task in tasks:
-            color = 'lightyellow' if task['status'] == 'completed' else 'white'
-            task_frame = tk.Frame(frame, bg=color, relief=tk.RAISED, bd=1)
-            task_frame.pack(fill=tk.X, padx=5, pady=2)
-
-            info_text = f"Сырье: {task['material']}\nЦвет: {task['color']}\nСкорость: {task['speed']}\nТемпература: {task['temperature']}"
-            if task['status'] == 'completed':
-                info_text += f"\nВыполнено: {task.get('completed', '')}"
-
-            tk.Label(
-                task_frame,
-                text=info_text,
-                bg=color,
-                font=('Arial', 9),
-                justify=tk.LEFT
-            ).pack(padx=5, pady=5)
-
-    def add_task(self, conveyor):
-        if not self.current_operator:
-            messagebox.showwarning("Предупреждение", "Сначала выберите оператора")
-            return
-
-        self.show_task_dialog(conveyor)
-
-    def show_task_dialog(self, conveyor):
-        dialog = tk.Toplevel(self.root)
-        dialog.title("Новая задача")
-        dialog.geometry("300x250")
-        dialog.transient(self.root)
-        dialog.grab_set()
-
-        ttk.Label(dialog, text="Сырье:").pack(pady=5)
-        material_entry = ttk.Entry(dialog, width=30)
-        material_entry.pack(pady=5)
-
-        ttk.Label(dialog, text="Цвет:").pack(pady=5)
-        color_entry = ttk.Entry(dialog, width=30)
-        color_entry.pack(pady=5)
-
-        ttk.Label(dialog, text="Скорость подачи:").pack(pady=5)
-        speed_entry = ttk.Entry(dialog, width=30)
-        speed_entry.pack(pady=5)
-
-        ttk.Label(dialog, text="Температура:").pack(pady=5)
-        temp_entry = ttk.Entry(dialog, width=30)
-        temp_entry.pack(pady=5)
-
-        def save_task():
-            task = {
-                'material': material_entry.get(),
-                'color': color_entry.get(),
-                'speed': speed_entry.get(),
-                'temperature': temp_entry.get()
-            }
-
-            result = self.server.handle_add_task({
-                'operator': self.current_operator,
-                'conveyor': conveyor,
-                'task': task
-            })
-
-            if result['status'] == 'success':
-                self.refresh_tasks()
-                dialog.destroy()
-            else:
-                messagebox.showerror("Ошибка", "Не удалось добавить задачу")
-
-        ttk.Button(dialog, text="Сохранить", command=save_task).pack(pady=10)
-
-    def add_operator(self):
-        dialog = tk.Toplevel(self.root)
-        dialog.title("Добавить оператора")
-        dialog.geometry("300x150")
-        dialog.transient(self.root)
-        dialog.grab_set()
-
-        ttk.Label(dialog, text="Логин:").pack(pady=5)
-        login_entry = ttk.Entry(dialog, width=30)
-        login_entry.pack(pady=5)
-
-        ttk.Label(dialog, text="Пароль:").pack(pady=5)
-        password_entry = ttk.Entry(dialog, width=30, show="*")
-        password_entry.pack(pady=5)
-
-        def save_operator():
-            result = self.server.handle_add_operator({
-                'username': login_entry.get(),
-                'password': password_entry.get()
-            })
-
-            if result['status'] == 'success':
-                self.refresh_operators()
-                dialog.destroy()
-            else:
-                messagebox.showerror("Ошибка", result['message'])
-
-        ttk.Button(dialog, text="Сохранить", command=save_operator).pack(pady=10)
-
-    def process_message(self, message, client_socket):
-        msg_type = message.get('type')
-
-        if msg_type == 'login':
-            return self.handle_login(message, client_socket)
-        elif msg_type == 'get_operators':
-            return self.handle_get_operators()
-        elif msg_type == 'add_task':
-            return self.handle_add_task(message)
-        elif msg_type == 'add_operator':
-            return self.handle_add_operator(message)
-        elif msg_type == 'update_task_status':
-            return self.handle_update_task_status(message)
-        elif msg_type == 'heartbeat':
-            return {'status': 'alive'}
-
-        return {'status': 'error', 'message': 'Неизвестный тип сообщения'}
-
-    def handle_login(self, message, client_socket):
-        username = message.get('username')
-        password = message.get('password')
-
-        if username in self.operators and self.operators[username]['password'] == password:
-            self.operators[username]['active'] = True
-            self.clients[username] = client_socket
-            return {'status': 'success', 'user_type': 'operator'}
-        elif username == 'manager' and password == 'manager':
-            return {'status': 'success', 'user_type': 'manager'}
-        else:
-            return {'status': 'error', 'message': 'Неверные учетные данные'}
-
-    def handle_get_operators(self):
-        operators_data = {}
-        for username, data in self.operators.items():
-            operators_data[username] = {
-                'active': data['active'],
-                'tasks': data['tasks']
-            }
-        return {'status': 'success', 'operators': operators_data}
+    def __del__(self):
+        """Деструктор - гарантирует корректное закрытие"""
+        self.stop_server()
 
 
+# Дополнительные утилиты для работы с сервером
+class ServerUtils:
+    @staticmethod
+    def validate_task_data(task_data):
+        """Валидация данных задачи"""
+        required_fields = ['material', 'color', 'speed', 'temperature']
+        for field in required_fields:
+            if not task_data.get(field):
+                return False, f"Отсутствует обязательное поле: {field}"
+
+        # Проверка числовых полей
+        try:
+            planned_quantity = int(task_data.get('planned_quantity', 0))
+            if planned_quantity < 0:
+                return False, "Количество не может быть отрицательным"
+        except ValueError:
+            return False, "Некорректное значение количества"
+
+        return True, "OK"
+
+    @staticmethod
+    def format_task_for_display(task):
+        """Форматирование задачи для отображения"""
+        return {
+            'id': task.get('id', ''),
+            'material': task.get('material', 'N/A'),
+            'color': task.get('color', 'N/A'),
+            'speed': task.get('speed', 'N/A'),
+            'temperature': task.get('temperature', 'N/A'),
+            'priority': task.get('priority', 'Средний'),
+            'planned_quantity': task.get('planned_quantity', 0),
+            'completed_quantity': task.get('completed_quantity', 0),
+            'unit': task.get('unit', 'шт'),
+            'status': task.get('status', 'active'),
+            'created': task.get('created', ''),
+            'completed': task.get('completed', '')
+        }
+
+
+# Пример использования сервера
 if __name__ == "__main__":
-    root = tk.Tk()
-    app = ManagerGUI(root)
-    root.mainloop()
+    def run_test_server():
+        """Запуск тестового сервера"""
+        server = ServerManager()
+
+        try:
+            server.start_server()
+            print("Сервер запущен. Нажмите Enter для остановки...")
+            input()
+        except KeyboardInterrupt:
+            print("\nОстановка сервера...")
+        finally:
+            server.stop_server()
+
+
+    run_test_server()
